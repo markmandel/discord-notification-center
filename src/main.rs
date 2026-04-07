@@ -19,6 +19,7 @@ use std::thread;
 
 use clap::{Parser, Subcommand};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -34,15 +35,15 @@ struct Config {
     client_secret: String,
 }
 
+fn config_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "~".into());
+    Ok(PathBuf::from(home)
+        .join(".config")
+        .join("discord-notification-center"))
+}
+
 fn load_config() -> Result<Config> {
-    let path: PathBuf = [
-        &std::env::var("HOME").unwrap_or_else(|_| "~".into()),
-        ".config",
-        "discord-notification-center",
-        "config.toml",
-    ]
-    .iter()
-    .collect();
+    let path = config_dir()?.join("config.toml");
 
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read config at {}: {e}", path.display()))?;
@@ -51,6 +52,99 @@ fn load_config() -> Result<Config> {
         .map_err(|e| format!("invalid config at {}: {e}", path.display()))?;
 
     Ok(config)
+}
+
+// ---------------------------------------------------------------------------
+// Database
+// ---------------------------------------------------------------------------
+
+fn open_db() -> Result<Connection> {
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create config dir {}: {e}", dir.display()))?;
+
+    let db_path = dir.join("notifications.db");
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("cannot open database {}: {e}", db_path.display()))?;
+
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS notifications (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            received_at          TEXT    NOT NULL,
+            read                 INTEGER NOT NULL DEFAULT 0,
+            pinned               INTEGER NOT NULL DEFAULT 0,
+
+            -- top-level notification fields
+            channel_id           TEXT    NOT NULL,
+            title                TEXT    NOT NULL,
+            body                 TEXT    NOT NULL,
+            icon_url             TEXT,
+
+            -- author
+            author_id            TEXT    NOT NULL,
+            author_username      TEXT    NOT NULL,
+            author_discriminator TEXT,
+            author_avatar        TEXT,
+            author_color         TEXT,
+            author_bot           INTEGER NOT NULL DEFAULT 0,
+
+            -- message
+            message_id           TEXT    NOT NULL,
+            message_timestamp    TEXT,
+            message_content      TEXT,
+            message_type         INTEGER
+        );
+    ")?;
+
+    println!("[db] opened {}", db_path.display());
+    Ok(conn)
+}
+
+fn store_notification(conn: &Connection, data: &Value) -> Result<()> {
+    let channel_id = data["channel_id"].as_str().unwrap_or("");
+    let title      = data["title"].as_str().unwrap_or("");
+    let body       = data["body"].as_str().unwrap_or("");
+    let icon_url   = data["icon_url"].as_str();
+
+    let msg    = &data["message"];
+    let author = &msg["author"];
+
+    let author_id            = author["id"].as_str().unwrap_or("");
+    let author_username      = author["username"].as_str().unwrap_or("");
+    let author_discriminator = author["discriminator"].as_str();
+    let author_avatar        = author["avatar"].as_str();
+    let author_color         = msg["author_color"].as_str();
+    let author_bot           = author["bot"].as_bool().unwrap_or(false) as i32;
+
+    let message_id        = msg["id"].as_str().unwrap_or("");
+    let message_timestamp = msg["timestamp"].as_str();
+    let message_content   = msg["content"].as_str();
+    let message_type      = msg["type"].as_i64();
+
+    let received_at = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO notifications (
+            received_at, channel_id, title, body, icon_url,
+            author_id, author_username, author_discriminator, author_avatar,
+            author_color, author_bot,
+            message_id, message_timestamp, message_content, message_type
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5,
+            ?6, ?7, ?8, ?9,
+            ?10, ?11,
+            ?12, ?13, ?14, ?15
+        )",
+        rusqlite::params![
+            received_at, channel_id, title, body, icon_url,
+            author_id, author_username, author_discriminator, author_avatar,
+            author_color, author_bot,
+            message_id, message_timestamp, message_content, message_type,
+        ],
+    )?;
+
+    println!("[db] stored notification from {author_username} in channel {channel_id}");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +295,8 @@ fn subscribe(client: &mut DiscordIpcClient, evt: &str, args: Value) -> Result<()
 // ---------------------------------------------------------------------------
 
 fn run_daemon(config: Config) -> Result<()> {
+    let db = open_db()?;
+
     let redirect_uri = "http://localhost:8080/callback";
     start_redirect_server()?;
     println!("redirect server listening at {redirect_uri}\n");
@@ -224,6 +320,12 @@ fn run_daemon(config: Config) -> Result<()> {
                     opcode_name(op),
                     serde_json::to_string_pretty(&data)?
                 );
+
+                if data["evt"] == "NOTIFICATION_CREATE" {
+                    if let Err(e) = store_notification(&db, &data["data"]) {
+                        eprintln!("[db] error storing notification: {e}");
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("recv error: {e}");
