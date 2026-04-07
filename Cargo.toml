@@ -18,3 +18,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+discord-rich-presence = "1.1.0"
+serde_json = "1"
+reqwest = { version = "0.13.2", features = ["blocking", "json"] }
+gtk4-layer-shell = "0.8.0"
+clap = "4.6.0"
