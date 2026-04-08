@@ -2,7 +2,7 @@
 
 A notification center for Discord. The daemon listens for incoming notifications
 via the Discord RPC IPC interface and stores them in a local SQLite database.
-The `show` command opens a Wayland layer-shell panel (Rose Pine themed) that
+The `toggle` command opens a Wayland layer-shell panel (Rose Pine themed) that
 displays unread notifications and lets you act on them.
 
 ## Commands
@@ -19,13 +19,13 @@ discord-notification-center
 discord-notification-center daemon
 ```
 
-### `show`
+### `toggle`
 
-Opens a Wayland layer-shell panel anchored to the right edge of the screen. The
-panel slides in from the right and displays unread (and pinned) notifications.
+Toggles the Wayland layer-shell notification panel: slides in from the right if
+not visible, or closes it if already open.
 
 ```
-discord-notification-center show
+discord-notification-center toggle
 ```
 
 **Panel features:**

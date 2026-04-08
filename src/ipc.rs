@@ -155,6 +155,37 @@ pub fn subscribe(client: &mut DiscordIpcClient, evt: &str, args: Value) -> Resul
     Ok(())
 }
 
+/// Opens a channel directly in the Discord client via a fresh IPC connection.
+/// No AUTHORIZE/AUTHENTICATE required — RPC_LOCAL_SCOPE is granted automatically
+/// to all IPC socket connections. For DMs pass `guild_id = None`.
+pub fn open_channel_in_discord(
+    client_id: &str,
+    guild_id: Option<&str>,
+    channel_id: &str,
+) -> Result<()> {
+    let mut client = DiscordIpcClient::new(client_id);
+    client.connect()?;
+
+    let guild = guild_id.unwrap_or("@me");
+    client.send(
+        json!({
+            "cmd": "DEEP_LINK",
+            "args": {
+                "type": "CHANNEL",
+                "params": {
+                    "guildId": guild,
+                    "channelId": channel_id
+                }
+            },
+            "nonce": format!("deep-link-{channel_id}")
+        }),
+        1,
+    )?;
+    client.recv()?;
+
+    Ok(())
+}
+
 /// Issues a GET_CHANNEL command and returns the guild_id from the response,
 /// or None for DMs (channel type 1 or 3) or if the field is absent.
 pub fn get_channel_guild_id(

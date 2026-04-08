@@ -38,8 +38,8 @@ struct Cli {
 enum Command {
     /// Listen for Discord notifications via IPC (default)
     Daemon,
-    /// Show the notification panel
-    Show,
+    /// Toggle the notification panel (show if hidden, hide if visible)
+    Toggle,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ fn main() -> Result<()> {
             let cfg = config::load_config()?;
             run_daemon(cfg)?;
         }
-        Command::Show => {
+        Command::Toggle => {
             show::run()?;
         }
     }

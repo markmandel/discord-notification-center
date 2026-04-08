@@ -217,6 +217,7 @@ viewport {
 // ---------------------------------------------------------------------------
 
 pub fn run() -> Result<()> {
+    let cfg = crate::config::load_config()?;
     let conn = Rc::new(db::open_db()?);
 
     let app = Application::builder()
@@ -224,7 +225,11 @@ pub fn run() -> Result<()> {
         .build();
 
     app.connect_activate(move |app| {
-        build_ui(app, conn.clone());
+        if let Some(window) = app.windows().first() {
+            window.close();
+        } else {
+            build_ui(app, conn.clone(), cfg.client_id.clone());
+        }
     });
 
     // Pass no args so GTK doesn't try to parse our clap args.
@@ -236,7 +241,7 @@ pub fn run() -> Result<()> {
 // Window construction
 // ---------------------------------------------------------------------------
 
-fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>) {
+fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, client_id: String) {
     let provider = CssProvider::new();
     provider.load_from_data(CSS);
     gtk4::style_context_add_provider_for_display(
@@ -314,7 +319,7 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>) {
     let show_all = Rc::new(Cell::new(false));
     let last_id = Rc::new(Cell::new(0i64));
 
-    load_notifications(&conn, &list_box, &show_all, &last_id);
+    load_notifications(&conn, &list_box, &show_all, &last_id, &client_id);
 
     // Show-all toggle: clear list and reload
     {
@@ -322,12 +327,13 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>) {
         let list_box = list_box.clone();
         let show_all = show_all.clone();
         let last_id = last_id.clone();
+        let client_id = client_id.clone();
         show_all_btn.connect_toggled(move |btn| {
             show_all.set(btn.is_active());
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
-            load_notifications(&conn, &list_box, &show_all, &last_id);
+            load_notifications(&conn, &list_box, &show_all, &last_id, &client_id);
         });
     }
 
@@ -337,12 +343,13 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>) {
         let list_box = list_box.clone();
         let show_all = show_all.clone();
         let last_id = last_id.clone();
+        let client_id = client_id.clone();
         mark_all_btn.connect_clicked(move |_| {
             let _ = db::mark_all_read(&*conn);
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
-            load_notifications(&conn, &list_box, &show_all, &last_id);
+            load_notifications(&conn, &list_box, &show_all, &last_id, &client_id);
         });
     }
 
@@ -352,13 +359,14 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>) {
         let list_box = list_box.clone();
         let show_all = show_all.clone();
         let last_id = last_id.clone();
+        let client_id = client_id.clone();
         glib::timeout_add_local(Duration::from_secs(1), move || {
             if show_all.get() {
                 return glib::ControlFlow::Continue;
             }
             if let Ok(new) = db::fetch_new_since(&*conn, last_id.get()) {
                 for n in &new {
-                    list_box.prepend(&build_row(n, &conn, &list_box, &show_all));
+                    list_box.prepend(&build_row(n, &conn, &list_box, &show_all, &client_id));
                     last_id.set(n.id);
                 }
             }
@@ -380,13 +388,14 @@ fn load_notifications(
     list_box: &ListBox,
     show_all: &Rc<Cell<bool>>,
     last_id: &Rc<Cell<i64>>,
+    client_id: &str,
 ) {
     let notifications = db::fetch_display(&**conn, show_all.get()).unwrap_or_default();
     if let Some(max) = notifications.iter().map(|n| n.id).max() {
         last_id.set(max);
     }
     for n in &notifications {
-        list_box.append(&build_row(n, conn, list_box, show_all));
+        list_box.append(&build_row(n, conn, list_box, show_all, client_id));
     }
 }
 
@@ -395,6 +404,7 @@ fn build_row(
     conn: &Rc<rusqlite::Connection>,
     list_box: &ListBox,
     show_all: &Rc<Cell<bool>>,
+    client_id: &str,
 ) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("notification-row");
@@ -460,7 +470,9 @@ fn build_row(
     let n_id = n.id;
     let pinned_state = Rc::new(Cell::new(n.pinned));
     let read_state = Rc::new(Cell::new(n.read));
-    let url = discord_url(n);
+    let n_channel_id = n.channel_id.clone();
+    let n_guild_id = n.guild_id.clone();
+    let client_id = client_id.to_string();
 
     // Pin / unpin
     {
@@ -532,7 +544,16 @@ fn build_row(
         let read_state = read_state.clone();
         let gesture = GestureClick::new();
         gesture.connect_released(move |_, _, _, _| {
-            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+            let channel_id = n_channel_id.clone();
+            let guild_id = n_guild_id.clone();
+            let cid = client_id.clone();
+            std::thread::spawn(move || {
+                let _ = crate::ipc::open_channel_in_discord(
+                    &cid,
+                    guild_id.as_deref(),
+                    &channel_id,
+                );
+            });
 
             if !read_state.get() {
                 read_state.set(true);
@@ -549,18 +570,6 @@ fn build_row(
     }
 
     row
-}
-
-fn discord_url(n: &Notification) -> String {
-    match &n.guild_id {
-        Some(gid) if !gid.is_empty() => {
-            format!("https://discord.com/channels/{}/{}/{}", gid, n.channel_id, n.message_id)
-        }
-        _ => format!(
-            "https://discord.com/channels/@me/{}/{}",
-            n.channel_id, n.message_id
-        ),
-    }
 }
 
 fn format_timestamp(ts: Option<&str>) -> String {
