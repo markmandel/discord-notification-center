@@ -2,15 +2,17 @@
 
 A notification center for Discord. The daemon listens for incoming notifications
 via the Discord RPC IPC interface and stores them in a local SQLite database.
-A GUI (in progress) will display them as a Wayland layer-shell overlay.
+The `show` command opens a Wayland layer-shell panel (Rose Pine themed) that
+displays unread notifications and lets you act on them.
 
 ## Commands
 
 ### `daemon` (default)
 
-Connects to the running Discord client via IPC, authenticates, subscribes to
-`NOTIFICATION_CREATE` events, and persists each notification to the local
-database.
+Connects to the running Discord client via IPC, authenticates, and subscribes to
+`NOTIFICATION_CREATE` events. Each notification is persisted to the local SQLite
+database, including the `guild_id` resolved via a follow-up `GET_CHANNEL` RPC call
+(needed for Discord deep links).
 
 ```
 discord-notification-center
@@ -19,11 +21,25 @@ discord-notification-center daemon
 
 ### `show`
 
-Opens the notification window (placeholder — GUI not yet implemented).
+Opens a Wayland layer-shell panel anchored to the right edge of the screen. The
+panel slides in from the right and displays unread (and pinned) notifications.
 
 ```
 discord-notification-center show
 ```
+
+**Panel features:**
+
+- Notifications are listed newest-first; new arrivals appear at the top in real time
+  while the panel is open (polled every second from the database)
+- Each notification has two action buttons:
+  - **📌 / 📍** — pin or unpin (pinned notifications stay visible until explicitly unpinned)
+  - **✓ / ↩** — mark as read / mark as unread
+- Clicking a notification opens it directly in the Discord client via `xdg-open` and
+  marks it as read
+- **Show all** toggle in the header switches between unread-only (default) and full
+  history; in full-history mode the read button acts as a toggle
+- **Esc** closes the panel
 
 ## Configuration
 

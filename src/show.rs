@@ -32,6 +32,21 @@ use crate::Result;
 // Rose Pine palette — matches dotfiles/quickshell/Common/Theme.qml
 // ---------------------------------------------------------------------------
 const CSS: &str = r#"
+/* Rose Pine Main
+ * Semantic roles per https://rosepinetheme.com/palette/
+ *   base       = primary background (app frames, header)
+ *   surface    = secondary background (cards, inputs)
+ *   overlay    = tertiary background (popovers, notifications, dialogs)
+ *   muted      = disabled / unfocused foreground (timestamps)
+ *   subtle     = comments / secondary foreground (body text)
+ *   text       = normal foreground (titles, active content)
+ *   love       = errors / unread indicator
+ *   gold       = warnings / pinned indicator
+ *   pine       = active / selected state (toggle on)
+ *   foam       = information / additions (read button)
+ *   iris       = hints / links (header accent)
+ *   highlight* = interactive backgrounds
+ */
 @define-color base           #191724;
 @define-color surface        #1f1d2e;
 @define-color overlay        #26233a;
@@ -48,32 +63,73 @@ const CSS: &str = r#"
 @define-color highlight_med  #403d52;
 @define-color highlight_high #524f67;
 
+/* Panel — base is the primary background */
 window {
-    background-color: alpha(@surface, 0.95);
+    background-color: @base;
     color: @rp_text;
     font-family: "JetBrains Mono", monospace;
     font-size: 10pt;
 }
 
+/* Header sits on base, just needs a separator */
 .notification-header {
     background-color: @base;
     border-bottom: 1px solid @highlight_med;
-    padding: 8px 12px;
+    padding: 12px 14px;
+    margin-bottom: 4px;
 }
 
+/* Iris = hints/links — a nice accent for the panel title */
 .notification-header-title {
     font-weight: bold;
-    font-size: 12pt;
-    color: @rp_text;
+    font-size: 11pt;
+    color: @iris;
+    letter-spacing: 0.5px;
 }
 
+/* "Show all" toggle — pine = active/selected state */
+button.toggle {
+    border: 1px solid @highlight_med;
+    border-radius: 12px;
+    padding: 2px 12px;
+    color: @subtle;
+    font-size: 9pt;
+}
+
+button.toggle:hover {
+    border-color: @highlight_high;
+    color: @rp_text;
+    background-color: @highlight_low;
+}
+
+button.toggle:checked {
+    background-color: @pine;
+    border-color: @pine;
+    color: @base;
+    font-weight: bold;
+}
+
+/* Notification rows — overlay = tertiary background (notifications/dialogs) */
 row.notification-row {
+    background-color: @overlay;
+    margin: 3px 8px;
+    border-radius: 8px;
+    border: none;
     padding: 0;
-    border-bottom: 1px solid @highlight_med;
 }
 
 row.notification-row:hover {
-    background-color: @highlight_high;
+    background-color: @highlight_med;
+}
+
+/* Love = unread indicator (left accent border) */
+row.notification-row.unread {
+    border-left: 3px solid @love;
+}
+
+/* Gold = pinned/important (left accent border, overrides unread) */
+row.notification-row.pinned-row {
+    border-left: 3px solid @gold;
 }
 
 .notification-title {
@@ -81,23 +137,28 @@ row.notification-row:hover {
     color: @rp_text;
 }
 
+/* Subtle = secondary foreground / comments */
 .notification-body {
     color: @subtle;
+    font-size: 9pt;
 }
 
+/* Muted = disabled / unfocused elements */
 .notification-time {
     color: @muted;
     font-size: 8pt;
 }
 
+/* Action buttons */
 button {
     background: transparent;
     border: none;
     color: @subtle;
-    padding: 2px 6px;
-    border-radius: 4px;
+    padding: 4px 8px;
+    border-radius: 6px;
     min-height: 0;
     min-width: 0;
+    font-size: 12pt;
 }
 
 button:hover {
@@ -105,17 +166,34 @@ button:hover {
     color: @rp_text;
 }
 
-.pinned {
+/* Gold = warnings / important-to-keep */
+.pin-btn.active-pin {
     color: @gold;
 }
 
+/* Foam = information / additions */
 .read-btn {
     color: @foam;
 }
 
+scrollbar slider {
+    background-color: @highlight_med;
+    border-radius: 4px;
+    min-width: 4px;
+    min-height: 4px;
+}
+
+scrollbar slider:hover {
+    background-color: @highlight_high;
+}
+
+#notification-list,
+#notification-list > row,
 scrolledwindow,
-scrolledwindow > viewport {
-    background: transparent;
+scrolledwindow > viewport,
+viewport {
+    background-color: @base;
+    color: @rp_text;
 }
 "#;
 
@@ -191,6 +269,7 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>) {
 
     // Notification list
     let list_box = ListBox::new();
+    list_box.set_widget_name("notification-list");
     list_box.set_selection_mode(SelectionMode::None);
 
     let scrolled = ScrolledWindow::new();
@@ -284,12 +363,14 @@ fn build_row(
 ) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("notification-row");
+    if !n.read   { row.add_css_class("unread"); }
+    if n.pinned  { row.add_css_class("pinned-row"); }
 
     let hbox = GtkBox::new(Orientation::Horizontal, 8);
-    hbox.set_margin_top(8);
-    hbox.set_margin_bottom(8);
-    hbox.set_margin_start(8);
-    hbox.set_margin_end(8);
+    hbox.set_margin_top(10);
+    hbox.set_margin_bottom(10);
+    hbox.set_margin_start(10);
+    hbox.set_margin_end(10);
 
     // Icon (placeholder — future: fetch icon_url asynchronously)
     let icon = Image::from_icon_name("user-info-symbolic");
@@ -310,6 +391,8 @@ fn build_row(
     let body_lbl = Label::new(Some(&n.body));
     body_lbl.set_halign(gtk4::Align::Start);
     body_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    body_lbl.set_lines(2);
+    body_lbl.set_single_line_mode(false);
     body_lbl.add_css_class("notification-body");
 
     let time_lbl = Label::new(Some(&format_timestamp(n.message_timestamp.as_deref())));
@@ -327,9 +410,8 @@ fn build_row(
 
     let pin_btn = Button::with_label(if n.pinned { "📍" } else { "📌" });
     pin_btn.set_tooltip_text(Some(if n.pinned { "Unpin" } else { "Pin" }));
-    if n.pinned {
-        pin_btn.add_css_class("pinned");
-    }
+    pin_btn.add_css_class("pin-btn");
+    if n.pinned { pin_btn.add_css_class("active-pin"); }
 
     let read_btn = Button::with_label(if n.read { "↩" } else { "✓" });
     read_btn.set_tooltip_text(Some(if n.read { "Mark unread" } else { "Mark read" }));
@@ -363,12 +445,14 @@ fn build_row(
             btn.set_label(if new_pinned { "📍" } else { "📌" });
             btn.set_tooltip_text(Some(if new_pinned { "Unpin" } else { "Pin" }));
             if new_pinned {
-                btn.add_css_class("pinned");
+                btn.add_css_class("active-pin");
+                if let Some(row) = row_weak.upgrade() { row.add_css_class("pinned-row"); }
             } else {
-                btn.remove_css_class("pinned");
-                // Unpinned + already read → remove from default view
-                if !show_all.get() && read_state.get() {
-                    if let Some(row) = row_weak.upgrade() {
+                btn.remove_css_class("active-pin");
+                if let Some(row) = row_weak.upgrade() {
+                    row.remove_css_class("pinned-row");
+                    // Unpinned + already read → remove from default view
+                    if !show_all.get() && read_state.get() {
                         list_box.remove(&row);
                     }
                 }
@@ -392,10 +476,15 @@ fn build_row(
             btn.set_label(if new_read { "↩" } else { "✓" });
             btn.set_tooltip_text(Some(if new_read { "Mark unread" } else { "Mark read" }));
 
-            // Default mode: marking read removes row unless pinned
-            if !show_all.get() && new_read && !pinned_state.get() {
-                if let Some(row) = row_weak.upgrade() {
-                    list_box.remove(&row);
+            if let Some(row) = row_weak.upgrade() {
+                if new_read {
+                    row.remove_css_class("unread");
+                    // Default mode: remove row unless pinned
+                    if !show_all.get() && !pinned_state.get() {
+                        list_box.remove(&row);
+                    }
+                } else {
+                    row.add_css_class("unread");
                 }
             }
         });
@@ -415,8 +504,9 @@ fn build_row(
             if !read_state.get() {
                 read_state.set(true);
                 let _ = db::set_read(&*conn, n_id, true);
-                if !show_all.get() {
-                    if let Some(row) = row_weak.upgrade() {
+                if let Some(row) = row_weak.upgrade() {
+                    row.remove_css_class("unread");
+                    if !show_all.get() {
                         list_box.remove(&row);
                     }
                 }
@@ -431,10 +521,10 @@ fn build_row(
 fn discord_url(n: &Notification) -> String {
     match &n.guild_id {
         Some(gid) if !gid.is_empty() => {
-            format!("discord://-/channels/{}/{}/{}", gid, n.channel_id, n.message_id)
+            format!("https://discord.com/channels/{}/{}/{}", gid, n.channel_id, n.message_id)
         }
         _ => format!(
-            "discord://-/channels/@me/{}/{}",
+            "https://discord.com/channels/@me/{}/{}",
             n.channel_id, n.message_id
         ),
     }
