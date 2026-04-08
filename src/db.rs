@@ -182,6 +182,11 @@ pub fn set_read(conn: &Connection, id: i64, read: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn mark_all_read(conn: &Connection) -> Result<()> {
+    conn.execute("UPDATE notifications SET read = 1 WHERE read = 0", [])?;
+    Ok(())
+}
+
 pub fn set_pinned(conn: &Connection, id: i64, pinned: bool) -> Result<()> {
     conn.execute(
         "UPDATE notifications SET pinned = ?1 WHERE id = ?2",

@@ -86,6 +86,21 @@ window {
     letter-spacing: 0.5px;
 }
 
+/* Header action buttons (Mark all read, etc.) */
+.header-btn {
+    border: 1px solid @highlight_med;
+    border-radius: 12px;
+    padding: 2px 10px;
+    color: @subtle;
+    font-size: 9pt;
+}
+
+.header-btn:hover {
+    border-color: @highlight_high;
+    color: @rp_text;
+    background-color: @highlight_low;
+}
+
 /* "Show all" toggle — pine = active/selected state */
 button.toggle {
     border: 1px solid @highlight_med;
@@ -258,9 +273,14 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>) {
     let header = GtkBox::new(Orientation::Horizontal, 8);
     header.add_css_class("notification-header");
 
+    let mark_all_btn = Button::with_label("✓ all");
+    mark_all_btn.set_tooltip_text(Some("Mark all as read"));
+    mark_all_btn.add_css_class("header-btn");
+    header.append(&mark_all_btn);
+
     let title_lbl = Label::new(Some("Notifications"));
     title_lbl.set_hexpand(true);
-    title_lbl.set_halign(gtk4::Align::Start);
+    title_lbl.set_halign(gtk4::Align::Center);
     title_lbl.add_css_class("notification-header-title");
     header.append(&title_lbl);
 
@@ -304,6 +324,21 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>) {
         let last_id = last_id.clone();
         show_all_btn.connect_toggled(move |btn| {
             show_all.set(btn.is_active());
+            while let Some(child) = list_box.first_child() {
+                list_box.remove(&child);
+            }
+            load_notifications(&conn, &list_box, &show_all, &last_id);
+        });
+    }
+
+    // Mark all read
+    {
+        let conn = conn.clone();
+        let list_box = list_box.clone();
+        let show_all = show_all.clone();
+        let last_id = last_id.clone();
+        mark_all_btn.connect_clicked(move |_| {
+            let _ = db::mark_all_read(&*conn);
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
