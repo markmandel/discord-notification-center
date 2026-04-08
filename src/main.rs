@@ -17,6 +17,9 @@ mod db;
 mod ipc;
 mod show;
 
+use std::thread;
+use std::time::Duration;
+
 use clap::{Parser, Subcommand};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use serde_json::json;
@@ -53,17 +56,15 @@ fn run_daemon(cfg: config::Config) -> Result<()> {
     ipc::start_redirect_server()?;
     println!("redirect server listening at {redirect_uri}\n");
 
-    let mut client = DiscordIpcClient::new(&cfg.client_id);
-    client.connect()?;
-    println!("connected (READY consumed during handshake)\n");
+    // Full OAuth flow once to get a long-lived access token.
+    let access_token = {
+        let mut client = DiscordIpcClient::new(&cfg.client_id);
+        client.connect()?;
+        let code = ipc::authorize(&mut client, &cfg.client_id)?;
+        ipc::exchange_code(&code, &cfg.client_id, &cfg.client_secret, redirect_uri)?
+    };
 
-    let code = ipc::authorize(&mut client, &cfg.client_id)?;
-    let access_token =
-        ipc::exchange_code(&code, &cfg.client_id, &cfg.client_secret, redirect_uri)?;
-    ipc::authenticate(&mut client, &access_token)?;
-    println!("authenticated\n");
-
-    ipc::subscribe(&mut client, "NOTIFICATION_CREATE", json!({}))?;
+    let mut client = daemon_connect(&cfg.client_id, &access_token)?;
 
     loop {
         match client.recv() {
@@ -76,8 +77,7 @@ fn run_daemon(cfg: config::Config) -> Result<()> {
 
                 if data["evt"] == "NOTIFICATION_CREATE" {
                     let channel_id = data["data"]["channel_id"].as_str().unwrap_or("");
-                    let guild_id =
-                        ipc::get_channel_guild_id(&mut client, channel_id);
+                    let guild_id = ipc::get_channel_guild_id(&mut client, channel_id);
 
                     if let Err(e) =
                         db::store_notification(&db, &data["data"], guild_id.as_deref())
@@ -87,13 +87,42 @@ fn run_daemon(cfg: config::Config) -> Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("recv error: {e}");
-                break;
+                eprintln!("[daemon] connection lost: {e}");
+                client = daemon_reconnect(&cfg.client_id, &access_token);
             }
         }
     }
+}
 
-    Ok(())
+/// Authenticate and subscribe on a fresh IPC connection.
+fn daemon_connect(client_id: &str, access_token: &str) -> Result<DiscordIpcClient> {
+    let mut client = DiscordIpcClient::new(client_id);
+    client.connect()?;
+    ipc::authenticate(&mut client, access_token)?;
+    println!("[daemon] authenticated\n");
+    ipc::subscribe(&mut client, "NOTIFICATION_CREATE", json!({}))?;
+    Ok(client)
+}
+
+/// Retry `daemon_connect` with exponential backoff until it succeeds.
+fn daemon_reconnect(client_id: &str, access_token: &str) -> DiscordIpcClient {
+    let backoff = [5u64, 10, 30, 60];
+    let mut attempt = 0usize;
+    loop {
+        let secs = backoff[attempt.min(backoff.len() - 1)];
+        eprintln!("[daemon] reconnecting in {secs}s…");
+        thread::sleep(Duration::from_secs(secs));
+        match daemon_connect(client_id, access_token) {
+            Ok(client) => {
+                println!("[daemon] reconnected");
+                return client;
+            }
+            Err(e) => {
+                eprintln!("[daemon] reconnect failed: {e}");
+                attempt += 1;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
