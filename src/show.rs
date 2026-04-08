@@ -75,8 +75,7 @@ window {
 .notification-header {
     background-color: @base;
     border-bottom: 1px solid @highlight_med;
-    padding: 12px 14px;
-    margin-bottom: 4px;
+    padding: 10px 14px;
 }
 
 /* Iris = hints/links — a nice accent for the panel title */
@@ -112,14 +111,15 @@ button.toggle:checked {
 /* Notification rows — overlay = tertiary background (notifications/dialogs) */
 row.notification-row {
     background-color: @overlay;
-    margin: 3px 8px;
+    margin: 4px 8px;
     border-radius: 8px;
-    border: none;
+    border: 1px solid @highlight_med;
     padding: 0;
 }
 
 row.notification-row:hover {
     background-color: @highlight_med;
+    border-color: @highlight_high;
 }
 
 /* Love = unread indicator (left accent border) */
@@ -367,10 +367,10 @@ fn build_row(
     if n.pinned  { row.add_css_class("pinned-row"); }
 
     let hbox = GtkBox::new(Orientation::Horizontal, 8);
-    hbox.set_margin_top(10);
-    hbox.set_margin_bottom(10);
-    hbox.set_margin_start(10);
-    hbox.set_margin_end(10);
+    hbox.set_margin_top(8);
+    hbox.set_margin_bottom(8);
+    hbox.set_margin_start(8);
+    hbox.set_margin_end(8);
 
     // Icon (placeholder — future: fetch icon_url asynchronously)
     let icon = Image::from_icon_name("user-info-symbolic");
@@ -391,8 +391,6 @@ fn build_row(
     let body_lbl = Label::new(Some(&n.body));
     body_lbl.set_halign(gtk4::Align::Start);
     body_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    body_lbl.set_lines(2);
-    body_lbl.set_single_line_mode(false);
     body_lbl.add_css_class("notification-body");
 
     let time_lbl = Label::new(Some(&format_timestamp(n.message_timestamp.as_deref())));
