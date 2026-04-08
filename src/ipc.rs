@@ -14,6 +14,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::mpsc;
 use std::thread;
 
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
@@ -155,35 +156,52 @@ pub fn subscribe(client: &mut DiscordIpcClient, evt: &str, args: Value) -> Resul
     Ok(())
 }
 
-/// Opens a channel directly in the Discord client via a fresh IPC connection.
-/// No AUTHORIZE/AUTHENTICATE required — RPC_LOCAL_SCOPE is granted automatically
-/// to all IPC socket connections. For DMs pass `guild_id = None`.
-pub fn open_channel_in_discord(
-    client_id: &str,
-    guild_id: Option<&str>,
-    channel_id: &str,
-) -> Result<()> {
-    let mut client = DiscordIpcClient::new(client_id);
-    client.connect()?;
+/// Spawns a background thread that keeps a single `DiscordIpcClient` connection
+/// alive and processes navigation requests sent over the returned channel.
+/// Each message is `(guild_id, channel_id)`; use `guild_id = None` for DMs.
+/// The connection is established lazily on the first message and re-established
+/// automatically if it ever drops.
+pub fn start_navigation_worker(client_id: String) -> mpsc::Sender<(Option<String>, String)> {
+    let (tx, rx) = mpsc::channel::<(Option<String>, String)>();
 
-    let guild = guild_id.unwrap_or("@me");
-    client.send(
-        json!({
-            "cmd": "DEEP_LINK",
-            "args": {
-                "type": "CHANNEL",
-                "params": {
-                    "guildId": guild,
-                    "channelId": channel_id
+    thread::spawn(move || {
+        let mut client: Option<DiscordIpcClient> = None;
+
+        for (guild_id, channel_id) in rx {
+            // Reconnect if we don't have a live connection.
+            if client.is_none() {
+                let mut c = DiscordIpcClient::new(&client_id);
+                match c.connect() {
+                    Ok(_) => client = Some(c),
+                    Err(e) => {
+                        eprintln!("[nav] connect failed: {e}");
+                        continue;
+                    }
                 }
-            },
-            "nonce": format!("deep-link-{channel_id}")
-        }),
-        1,
-    )?;
-    client.recv()?;
+            }
 
-    Ok(())
+            let guild = guild_id.as_deref().unwrap_or("@me");
+            if let Err(e) = client.as_mut().unwrap().send(
+                json!({
+                    "cmd": "DEEP_LINK",
+                    "args": {
+                        "type": "CHANNEL",
+                        "params": {
+                            "guildId": guild,
+                            "channelId": channel_id
+                        }
+                    },
+                    "nonce": format!("deep-link-{channel_id}")
+                }),
+                1,
+            ) {
+                eprintln!("[nav] send failed: {e}");
+                client = None; // will reconnect on next message
+            }
+        }
+    });
+
+    tx
 }
 
 /// Issues a GET_CHANNEL command and returns the guild_id from the response,
