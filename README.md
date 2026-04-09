@@ -14,6 +14,12 @@ Connects to the running Discord client via IPC, authenticates, and subscribes to
 database, including the `guild_id` resolved via a follow-up `GET_CHANNEL` RPC call
 (needed for Discord deep links).
 
+If the connection to Discord drops (e.g. Discord is restarted), the daemon
+reconnects automatically with exponential backoff (5s → 10s → 30s → 60s).
+
+Notifications older than 24 hours (excluding pinned) are deleted on startup and
+once every 24 hours while the daemon is running.
+
 ```
 discord-notification-center
 discord-notification-center daemon
@@ -22,7 +28,8 @@ discord-notification-center daemon
 ### `toggle`
 
 Toggles the Wayland layer-shell notification panel: slides in from the right if
-not visible, or closes it if already open.
+not visible, or closes it if already open. Bind this to a key in your compositor
+for quick access.
 
 ```
 discord-notification-center toggle
@@ -30,14 +37,18 @@ discord-notification-center toggle
 
 **Panel features:**
 
-- Notifications are listed newest-first; new arrivals appear at the top in real time
-  while the panel is open (polled every second from the database)
+- Only notifications from the last 24 hours are shown (pinned notifications are
+  always visible regardless of age)
+- Notifications are listed newest-first; new arrivals appear at the top in real
+  time while the panel is open (polled every second from the database)
+- Sender avatars are loaded asynchronously from Discord's CDN
 - Each notification has two action buttons:
   - **📌 / 📍** — pin or unpin (pinned notifications stay visible until explicitly unpinned)
   - **✓ / ↩** — mark as read / mark as unread
-- Clicking a notification opens it directly in the Discord client via `xdg-open` and
-  marks it as read
-- **Show all** toggle in the header switches between unread-only (default) and full
+- Clicking a notification navigates directly to that message in the Discord client
+  and marks it as read
+- **✓ all** button in the header marks every notification as read
+- **All** toggle in the header switches between unread-only (default) and full
   history; in full-history mode the read button acts as a toggle
 - **Esc** closes the panel
 
@@ -76,3 +87,7 @@ are pulled in automatically as dependencies of the dev packages above.
 ```
 cargo build --release
 ```
+
+## LICENCE
+
+Apache 2.0
