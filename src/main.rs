@@ -49,8 +49,25 @@ enum Command {
 // Commands
 // ---------------------------------------------------------------------------
 
+fn run_gc(db: &rusqlite::Connection) {
+    match db::delete_old_notifications(db) {
+        Ok(n) => println!("[gc] deleted {n} old notification(s)"),
+        Err(e) => eprintln!("[gc] error: {e}"),
+    }
+}
+
 fn run_daemon(cfg: config::Config) -> Result<()> {
     let db = db::open_db()?;
+
+    // GC on startup, then once every 24 hours on a separate connection.
+    run_gc(&db);
+    thread::spawn(|| loop {
+        thread::sleep(Duration::from_secs(24 * 3600));
+        match db::open_db() {
+            Ok(conn) => run_gc(&conn),
+            Err(e)   => eprintln!("[gc] could not open db: {e}"),
+        }
+    });
 
     let redirect_uri = "http://localhost:8080/callback";
     ipc::start_redirect_server()?;

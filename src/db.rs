@@ -144,6 +144,7 @@ pub fn fetch_display(conn: &Connection, show_all: bool) -> Result<Vec<Notificati
                 author_color, author_bot, message_id, message_timestamp,
                 message_content, message_type, guild_id
          FROM notifications
+         WHERE received_at > datetime('now', '-24 hours') OR pinned = 1
          ORDER BY received_at DESC"
     } else {
         "SELECT id, received_at, read, pinned, channel_id, title, body, icon_url,
@@ -151,7 +152,7 @@ pub fn fetch_display(conn: &Connection, show_all: bool) -> Result<Vec<Notificati
                 author_color, author_bot, message_id, message_timestamp,
                 message_content, message_type, guild_id
          FROM notifications
-         WHERE read = 0 OR pinned = 1
+         WHERE (read = 0 AND received_at > datetime('now', '-24 hours')) OR pinned = 1
          ORDER BY received_at DESC"
     };
 
@@ -185,6 +186,14 @@ pub fn set_read(conn: &Connection, id: i64, read: bool) -> Result<()> {
 pub fn mark_all_read(conn: &Connection) -> Result<()> {
     conn.execute("UPDATE notifications SET read = 1 WHERE read = 0", [])?;
     Ok(())
+}
+
+pub fn delete_old_notifications(conn: &Connection) -> Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM notifications WHERE pinned = 0 AND received_at < datetime('now', '-24 hours')",
+        [],
+    )?;
+    Ok(n)
 }
 
 pub fn set_pinned(conn: &Connection, id: i64, pinned: bool) -> Result<()> {
