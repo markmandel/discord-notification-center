@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -213,6 +214,8 @@ viewport {
 }
 "#;
 
+type IconCache = Rc<RefCell<HashMap<String, gtk4::gdk::Texture>>>;
+
 // ---------------------------------------------------------------------------
 // Icon fetch semaphore — limits concurrent HTTP requests to avoid CDN
 // rate-limiting. Clone is cheap (wraps an Arc).
@@ -270,6 +273,7 @@ pub fn run() -> Result<()> {
 
 fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sender<(Option<String>, String)>) {
     let fetch_sem = FetchSem::new(4);
+    let icon_cache: IconCache = Rc::new(RefCell::new(HashMap::new()));
     let provider = CssProvider::new();
     provider.load_from_data(CSS);
     gtk4::style_context_add_provider_for_display(
@@ -347,7 +351,7 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
     let show_all = Rc::new(Cell::new(false));
     let last_id = Rc::new(Cell::new(0i64));
 
-    load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem);
+    load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
 
     // Show-all toggle: clear list and reload
     {
@@ -357,12 +361,13 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
         let last_id = last_id.clone();
         let nav_tx = nav_tx.clone();
         let fetch_sem = fetch_sem.clone();
+        let icon_cache = icon_cache.clone();
         show_all_btn.connect_toggled(move |btn| {
             show_all.set(btn.is_active());
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
-            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem);
+            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
         });
     }
 
@@ -374,12 +379,13 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
         let last_id = last_id.clone();
         let nav_tx = nav_tx.clone();
         let fetch_sem = fetch_sem.clone();
+        let icon_cache = icon_cache.clone();
         mark_all_btn.connect_clicked(move |_| {
             let _ = db::mark_all_read(&*conn);
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
-            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem);
+            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
         });
     }
 
@@ -391,13 +397,14 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
         let last_id = last_id.clone();
         let nav_tx = nav_tx.clone();
         let fetch_sem = fetch_sem.clone();
+        let icon_cache = icon_cache.clone();
         glib::timeout_add_local(Duration::from_secs(1), move || {
             if show_all.get() {
                 return glib::ControlFlow::Continue;
             }
             if let Ok(new) = db::fetch_new_since(&*conn, last_id.get()) {
                 for n in &new {
-                    list_box.prepend(&build_row(n, &conn, &list_box, &show_all, &nav_tx, &fetch_sem));
+                    list_box.prepend(&build_row(n, &conn, &list_box, &show_all, &nav_tx, &fetch_sem, &icon_cache));
                     last_id.set(n.id);
                 }
             }
@@ -421,13 +428,14 @@ fn load_notifications(
     last_id: &Rc<Cell<i64>>,
     nav_tx: &mpsc::Sender<(Option<String>, String)>,
     fetch_sem: &FetchSem,
+    icon_cache: &IconCache,
 ) {
     let notifications = db::fetch_display(&**conn, show_all.get()).unwrap_or_default();
     if let Some(max) = notifications.iter().map(|n| n.id).max() {
         last_id.set(max);
     }
     for n in &notifications {
-        list_box.append(&build_row(n, conn, list_box, show_all, nav_tx, fetch_sem));
+        list_box.append(&build_row(n, conn, list_box, show_all, nav_tx, fetch_sem, icon_cache));
     }
 }
 
@@ -438,6 +446,7 @@ fn build_row(
     show_all: &Rc<Cell<bool>>,
     nav_tx: &mpsc::Sender<(Option<String>, String)>,
     fetch_sem: &FetchSem,
+    icon_cache: &IconCache,
 ) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("notification-row");
@@ -457,38 +466,44 @@ fn build_row(
     hbox.append(&icon);
 
     if let Some(url) = n.icon_url.clone() {
-        let icon_weak = icon.downgrade();
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let sem = fetch_sem.clone();
+        // Cache hit — apply immediately with no fetch needed.
+        if let Some(texture) = icon_cache.borrow().get(&url).cloned() {
+            icon.set_paintable(Some(&texture));
+        } else {
+            let icon_weak = icon.downgrade();
+            let cache = icon_cache.clone();
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            let sem = fetch_sem.clone();
+            let url_key = url.clone();
 
-        // Fetch bytes on a background thread (only tx/sem cross the thread boundary).
-        // acquire() blocks until a slot is free, naturally serialising by priority.
-        std::thread::spawn(move || {
-            sem.acquire();
-            if let Ok(resp) = reqwest::blocking::get(&url) {
-                if let Ok(bytes) = resp.bytes() {
-                    let _ = tx.send(bytes.to_vec());
+            std::thread::spawn(move || {
+                sem.acquire();
+                if let Ok(resp) = reqwest::blocking::get(&url) {
+                    if let Ok(bytes) = resp.bytes() {
+                        let _ = tx.send(bytes.to_vec());
+                    }
                 }
-            }
-            sem.release();
-        });
+                sem.release();
+            });
 
-        // Poll on the GTK main thread (idle) — no Send required here.
-        glib::idle_add_local(move || {
-            match rx.try_recv() {
-                Ok(bytes) => {
-                    if let Some(icon) = icon_weak.upgrade() {
+            // Poll on the GTK main thread — no Send required here.
+            glib::idle_add_local(move || {
+                match rx.try_recv() {
+                    Ok(bytes) => {
                         let gb = glib::Bytes::from_owned(bytes);
                         if let Ok(texture) = gtk4::gdk::Texture::from_bytes(&gb) {
-                            icon.set_paintable(Some(&texture));
+                            cache.borrow_mut().insert(url_key.clone(), texture.clone());
+                            if let Some(icon) = icon_weak.upgrade() {
+                                icon.set_paintable(Some(&texture));
+                            }
                         }
+                        glib::ControlFlow::Break
                     }
-                    glib::ControlFlow::Break
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-            }
-        });
+            });
+        }
     }
 
     // Text column
