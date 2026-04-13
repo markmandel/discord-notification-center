@@ -621,7 +621,7 @@ fn build_group_row(
     });
     outer_vbox.add_controller(motion);
 
-    // --- Mark-group-read handler ---
+    // --- Mark-group-read button handler (no navigation) ---
     {
         let conn = conn.clone();
         let list_box = list_box.clone();
@@ -633,6 +633,25 @@ fn build_group_row(
                 list_box.remove(&row);
             }
         });
+    }
+
+    // --- Click header → navigate to newest + mark all read ---
+    {
+        let nav_tx = nav_tx.clone();
+        let conn = conn.clone();
+        let list_box = list_box.clone();
+        let row_weak = row.downgrade();
+        let channel_id = newest.channel_id.clone();
+        let guild_id = newest.guild_id.clone();
+        let gesture = GestureClick::new();
+        gesture.connect_released(move |_, _, _, _| {
+            let _ = nav_tx.send((guild_id.clone(), channel_id.clone()));
+            let _ = db::mark_channel_read(&*conn, &channel_id);
+            if let Some(row) = row_weak.upgrade() {
+                list_box.remove(&row);
+            }
+        });
+        header_hbox.add_controller(gesture);
     }
 
     row
