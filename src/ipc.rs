@@ -37,9 +37,9 @@ pub fn start_redirect_server() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:8080")?;
 
     thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-
+        // Accept exactly one connection — the OAuth callback — then stop,
+        // which drops the listener and releases port 8080.
+        if let Ok((mut stream, _)) = listener.accept() {
             let mut request_line = String::new();
             BufReader::new(&stream).read_line(&mut request_line).ok();
             println!("[redirect server] {request_line}");

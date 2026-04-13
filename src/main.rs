@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
+use fs2::FileExt;
 use serde_json::json;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -63,6 +64,17 @@ fn notify(summary: &str, body: &str) {
 }
 
 fn run_daemon(cfg: config::Config) -> Result<()> {
+    // Ensure only one daemon runs at a time. The lock is released automatically
+    // by the kernel when the process exits (including crashes).
+    let lock_path = config::config_dir()?.join("daemon.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&lock_path)?;
+    lock_file.try_lock_exclusive().map_err(|_| {
+        "another daemon instance is already running"
+    })?;
+
     let db = db::open_db()?;
 
     // GC on startup, then once every 24 hours on a separate connection.
