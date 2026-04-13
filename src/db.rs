@@ -196,6 +196,14 @@ pub fn delete_old_notifications(conn: &Connection) -> Result<usize> {
     Ok(n)
 }
 
+pub fn mark_channel_read(conn: &Connection, channel_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE notifications SET read = 1 WHERE channel_id = ?1 AND read = 0",
+        rusqlite::params![channel_id],
+    )?;
+    Ok(())
+}
+
 pub fn set_pinned(conn: &Connection, id: i64, pinned: bool) -> Result<()> {
     conn.execute(
         "UPDATE notifications SET pinned = ?1 WHERE id = ?2",

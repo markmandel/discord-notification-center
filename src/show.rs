@@ -22,8 +22,8 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, EventControllerKey,
-    GestureClick, Image, Label, ListBox, ListBoxRow, Orientation, PolicyType, Revealer,
-    RevealerTransitionType, ScrolledWindow, SelectionMode, ToggleButton,
+    EventControllerMotion, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
+    PolicyType, Revealer, RevealerTransitionType, ScrolledWindow, SelectionMode, ToggleButton,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
@@ -202,6 +202,43 @@ scrollbar slider {
 
 scrollbar slider:hover {
     background-color: @highlight_high;
+}
+
+/* Notification group (multi-message channel summary) */
+row.notification-group {
+    background-color: @overlay;
+    margin: 4px 8px;
+    border-radius: 8px;
+    border: 1px solid @highlight_med;
+    border-left: 3px solid @love;
+    padding: 0;
+}
+
+row.notification-group:hover {
+    background-color: @highlight_med;
+    border-color: @highlight_high;
+}
+
+row.notification-group.pinned-row {
+    border-left: 3px solid @gold;
+}
+
+.group-count {
+    background-color: @love;
+    color: @base;
+    font-size: 8pt;
+    font-weight: bold;
+    border-radius: 8px;
+    padding: 1px 6px;
+}
+
+.group-read-btn {
+    color: @foam;
+}
+
+#group-inner-list,
+#group-inner-list > row {
+    background-color: @base;
 }
 
 #notification-list,
@@ -403,9 +440,11 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
                 return glib::ControlFlow::Continue;
             }
             if let Ok(new) = db::fetch_new_since(&*conn, last_id.get()) {
-                for n in &new {
-                    list_box.prepend(&build_row(n, &conn, &list_box, &show_all, &nav_tx, &fetch_sem, &icon_cache));
-                    last_id.set(n.id);
+                if !new.is_empty() {
+                    while let Some(child) = list_box.first_child() {
+                        list_box.remove(&child);
+                    }
+                    load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
                 }
             }
             glib::ControlFlow::Continue
@@ -434,9 +473,169 @@ fn load_notifications(
     if let Some(max) = notifications.iter().map(|n| n.id).max() {
         last_id.set(max);
     }
-    for n in &notifications {
-        list_box.append(&build_row(n, conn, list_box, show_all, nav_tx, fetch_sem, icon_cache));
+    if show_all.get() {
+        for n in &notifications {
+            list_box.append(&build_row(n, conn, list_box, show_all, nav_tx, fetch_sem, icon_cache));
+        }
+    } else {
+        for group in &group_notifications(notifications) {
+            let widget = if group.len() == 1 {
+                build_row(&group[0], conn, list_box, show_all, nav_tx, fetch_sem, icon_cache)
+            } else {
+                build_group_row(group, conn, list_box, show_all, nav_tx, fetch_sem, icon_cache)
+            };
+            list_box.append(&widget);
+        }
     }
+}
+
+fn build_group_row(
+    group: &[Notification],
+    conn: &Rc<rusqlite::Connection>,
+    list_box: &ListBox,
+    show_all: &Rc<Cell<bool>>,
+    nav_tx: &mpsc::Sender<(Option<String>, String)>,
+    fetch_sem: &FetchSem,
+    icon_cache: &IconCache,
+) -> ListBoxRow {
+    let newest = &group[0];
+    let unread_count = group.iter().filter(|n| !n.read).count();
+
+    let row = ListBoxRow::new();
+    row.add_css_class("notification-group");
+    if group.iter().any(|n| n.pinned) {
+        row.add_css_class("pinned-row");
+    }
+
+    // --- Header ---
+    let header_hbox = GtkBox::new(Orientation::Horizontal, 8);
+    header_hbox.set_margin_top(8);
+    header_hbox.set_margin_bottom(8);
+    header_hbox.set_margin_start(8);
+    header_hbox.set_margin_end(8);
+
+    // Icon (same async fetch/cache pattern as build_row)
+    let icon = Image::from_icon_name("user-info-symbolic");
+    icon.set_pixel_size(40);
+    icon.set_valign(gtk4::Align::Start);
+    header_hbox.append(&icon);
+
+    if let Some(url) = newest.icon_url.clone() {
+        if let Some(texture) = icon_cache.borrow().get(&url).cloned() {
+            icon.set_paintable(Some(&texture));
+        } else {
+            let icon_weak = icon.downgrade();
+            let cache = icon_cache.clone();
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            let sem = fetch_sem.clone();
+            let url_key = url.clone();
+            std::thread::spawn(move || {
+                sem.acquire();
+                if let Ok(resp) = reqwest::blocking::get(&url) {
+                    if let Ok(bytes) = resp.bytes() {
+                        let _ = tx.send(bytes.to_vec());
+                    }
+                }
+                sem.release();
+            });
+            glib::idle_add_local(move || {
+                match rx.try_recv() {
+                    Ok(bytes) => {
+                        let gb = glib::Bytes::from_owned(bytes);
+                        if let Ok(texture) = gtk4::gdk::Texture::from_bytes(&gb) {
+                            cache.borrow_mut().insert(url_key.clone(), texture.clone());
+                            if let Some(icon) = icon_weak.upgrade() {
+                                icon.set_paintable(Some(&texture));
+                            }
+                        }
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                }
+            });
+        }
+    }
+
+    // Text (title + body preview)
+    let text_vbox = GtkBox::new(Orientation::Vertical, 2);
+    text_vbox.set_hexpand(true);
+    text_vbox.set_valign(gtk4::Align::Center);
+
+    let title_lbl = Label::new(Some(&newest.title));
+    title_lbl.set_halign(gtk4::Align::Start);
+    title_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    title_lbl.add_css_class("notification-title");
+
+    let body_lbl = Label::new(Some(&newest.body));
+    body_lbl.set_halign(gtk4::Align::Start);
+    body_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    body_lbl.add_css_class("notification-body");
+
+    text_vbox.append(&title_lbl);
+    text_vbox.append(&body_lbl);
+    header_hbox.append(&text_vbox);
+
+    // Count badge
+    let count_lbl = Label::new(Some(&format!("{unread_count}")));
+    count_lbl.add_css_class("group-count");
+    count_lbl.set_valign(gtk4::Align::Center);
+    header_hbox.append(&count_lbl);
+
+    // Mark-group-read button
+    let mark_btn = Button::with_label("✓");
+    mark_btn.set_tooltip_text(Some("Mark all read"));
+    mark_btn.add_css_class("group-read-btn");
+    header_hbox.append(&mark_btn);
+
+    // --- Expanded inner list (inside Revealer) ---
+    let inner_list = ListBox::new();
+    inner_list.set_selection_mode(SelectionMode::None);
+    inner_list.set_widget_name("group-inner-list");
+
+    for n in group {
+        inner_list.append(&build_row(n, conn, &inner_list, show_all, nav_tx, fetch_sem, icon_cache));
+    }
+
+    let revealer = Revealer::new();
+    revealer.set_transition_type(RevealerTransitionType::SlideDown);
+    revealer.set_transition_duration(200);
+    revealer.set_child(Some(&inner_list));
+    revealer.set_reveal_child(false);
+
+    // --- Outer vertical box ---
+    let outer_vbox = GtkBox::new(Orientation::Vertical, 0);
+    outer_vbox.append(&header_hbox);
+    outer_vbox.append(&revealer);
+    row.set_child(Some(&outer_vbox));
+
+    // --- Hover to expand/collapse ---
+    let motion = EventControllerMotion::new();
+    let rev_weak = revealer.downgrade();
+    motion.connect_enter(move |_, _, _| {
+        if let Some(r) = rev_weak.upgrade() { r.set_reveal_child(true); }
+    });
+    let rev_weak = revealer.downgrade();
+    motion.connect_leave(move |_| {
+        if let Some(r) = rev_weak.upgrade() { r.set_reveal_child(false); }
+    });
+    outer_vbox.add_controller(motion);
+
+    // --- Mark-group-read handler ---
+    {
+        let conn = conn.clone();
+        let list_box = list_box.clone();
+        let row_weak = row.downgrade();
+        let channel_id = newest.channel_id.clone();
+        mark_btn.connect_clicked(move |_| {
+            let _ = db::mark_channel_read(&*conn, &channel_id);
+            if let Some(row) = row_weak.upgrade() {
+                list_box.remove(&row);
+            }
+        });
+    }
+
+    row
 }
 
 fn build_row(
@@ -644,6 +843,21 @@ fn build_row(
     }
 
     row
+}
+
+/// Groups notifications by channel_id, preserving insertion order (= newest group first,
+/// since the input is already `received_at DESC`). Each inner Vec has `[0]` as newest.
+fn group_notifications(notifications: Vec<Notification>) -> Vec<Vec<Notification>> {
+    let mut keys: Vec<String> = Vec::new();
+    let mut map: HashMap<String, Vec<Notification>> = HashMap::new();
+    for n in notifications {
+        if !map.contains_key(&n.channel_id) {
+            keys.push(n.channel_id.clone());
+            map.insert(n.channel_id.clone(), Vec::new());
+        }
+        map.get_mut(&n.channel_id).unwrap().push(n);
+    }
+    keys.into_iter().map(|k| map.remove(&k).unwrap()).collect()
 }
 
 fn format_timestamp(ts: Option<&str>) -> String {
