@@ -56,6 +56,12 @@ fn run_gc(db: &rusqlite::Connection) {
     }
 }
 
+fn notify(summary: &str, body: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .args(["--app-name=Discord Notification Center", summary, body])
+        .spawn();
+}
+
 fn run_daemon(cfg: config::Config) -> Result<()> {
     let db = db::open_db()?;
 
@@ -73,15 +79,15 @@ fn run_daemon(cfg: config::Config) -> Result<()> {
     ipc::start_redirect_server()?;
     println!("redirect server listening at {redirect_uri}\n");
 
-    // Full OAuth flow once to get a long-lived access token.
-    let access_token = {
-        let mut client = DiscordIpcClient::new(&cfg.client_id);
-        client.connect()?;
-        let code = ipc::authorize(&mut client, &cfg.client_id)?;
-        ipc::exchange_code(&code, &cfg.client_id, &cfg.client_secret, redirect_uri)?
-    };
+    // Full OAuth flow once — retries every 5s until Discord is available.
+    let access_token = retry_until(
+        "Discord not available",
+        || notify("Discord Notification Center", "Waiting for Discord to start…"),
+        || initial_auth(&cfg, redirect_uri),
+    );
 
     let mut client = daemon_connect(&cfg.client_id, &access_token)?;
+    notify("Discord Notification Center", "Connected to Discord.");
 
     loop {
         match client.recv() {
@@ -105,10 +111,43 @@ fn run_daemon(cfg: config::Config) -> Result<()> {
             }
             Err(e) => {
                 eprintln!("[daemon] connection lost: {e}");
-                client = daemon_reconnect(&cfg.client_id, &access_token);
+                notify("Discord Notification Center", "Lost connection to Discord, reconnecting…");
+                client = retry_until(
+                    "reconnect failed",
+                    || {},
+                    || daemon_connect(&cfg.client_id, &access_token),
+                );
+                notify("Discord Notification Center", "Reconnected to Discord.");
             }
         }
     }
+}
+
+/// Retry `op` every 5 seconds until it succeeds. Logs and calls `on_first_fail`
+/// on the first failure, then retries silently.
+fn retry_until<T>(label: &str, on_first_fail: impl Fn(), op: impl Fn() -> Result<T>) -> T {
+    let mut first = true;
+    loop {
+        match op() {
+            Ok(val) => return val,
+            Err(e) => {
+                if first {
+                    eprintln!("[daemon] {label}: {e}");
+                    on_first_fail();
+                    first = false;
+                }
+                thread::sleep(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
+/// Try the full OAuth flow once; returns the access token or an error.
+fn initial_auth(cfg: &config::Config, redirect_uri: &str) -> Result<String> {
+    let mut client = DiscordIpcClient::new(&cfg.client_id);
+    client.connect()?;
+    let code = ipc::authorize(&mut client, &cfg.client_id)?;
+    ipc::exchange_code(&code, &cfg.client_id, &cfg.client_secret, redirect_uri)
 }
 
 /// Authenticate and subscribe on a fresh IPC connection.
@@ -119,27 +158,6 @@ fn daemon_connect(client_id: &str, access_token: &str) -> Result<DiscordIpcClien
     println!("[daemon] authenticated\n");
     ipc::subscribe(&mut client, "NOTIFICATION_CREATE", json!({}))?;
     Ok(client)
-}
-
-/// Retry `daemon_connect` with exponential backoff until it succeeds.
-fn daemon_reconnect(client_id: &str, access_token: &str) -> DiscordIpcClient {
-    let backoff = [5u64, 10, 30, 60];
-    let mut attempt = 0usize;
-    loop {
-        let secs = backoff[attempt.min(backoff.len() - 1)];
-        eprintln!("[daemon] reconnecting in {secs}s…");
-        thread::sleep(Duration::from_secs(secs));
-        match daemon_connect(client_id, access_token) {
-            Ok(client) => {
-                println!("[daemon] reconnected");
-                return client;
-            }
-            Err(e) => {
-                eprintln!("[daemon] reconnect failed: {e}");
-                attempt += 1;
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
