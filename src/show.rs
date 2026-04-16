@@ -475,14 +475,14 @@ fn load_notifications(
     }
     if show_all.get() {
         for n in &notifications {
-            list_box.append(&build_row(n, conn, list_box, show_all, nav_tx, fetch_sem, icon_cache));
+            list_box.append(&build_row(n, conn, list_box, show_all, nav_tx, fetch_sem, icon_cache, None));
         }
     } else {
         for group in &group_notifications(notifications) {
             let widget = if group.len() == 1 {
-                build_row(&group[0], conn, list_box, show_all, nav_tx, fetch_sem, icon_cache)
+                build_row(&group[0], conn, list_box, show_all, nav_tx, fetch_sem, icon_cache, None)
             } else {
-                build_group_row(group, conn, list_box, show_all, nav_tx, fetch_sem, icon_cache)
+                build_group_row(group, conn, list_box, show_all, last_id, nav_tx, fetch_sem, icon_cache)
             };
             list_box.append(&widget);
         }
@@ -494,12 +494,29 @@ fn build_group_row(
     conn: &Rc<rusqlite::Connection>,
     list_box: &ListBox,
     show_all: &Rc<Cell<bool>>,
+    last_id: &Rc<Cell<i64>>,
     nav_tx: &mpsc::Sender<(Option<String>, String)>,
     fetch_sem: &FetchSem,
     icon_cache: &IconCache,
 ) -> ListBoxRow {
     let newest = &group[0];
     let unread_count = group.iter().filter(|n| !n.read).count();
+
+    let do_reload: Rc<dyn Fn()> = {
+        let conn = conn.clone();
+        let list_box = list_box.clone();
+        let show_all = show_all.clone();
+        let last_id = last_id.clone();
+        let nav_tx = nav_tx.clone();
+        let fetch_sem = fetch_sem.clone();
+        let icon_cache = icon_cache.clone();
+        Rc::new(move || {
+            while let Some(child) = list_box.first_child() {
+                list_box.remove(&child);
+            }
+            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
+        })
+    };
 
     let row = ListBoxRow::new();
     row.add_css_class("notification-group");
@@ -594,7 +611,7 @@ fn build_group_row(
     inner_list.set_widget_name("group-inner-list");
 
     for n in group {
-        inner_list.append(&build_row(n, conn, &inner_list, show_all, nav_tx, fetch_sem, icon_cache));
+        inner_list.append(&build_row(n, conn, &inner_list, show_all, nav_tx, fetch_sem, icon_cache, Some(Rc::clone(&do_reload))));
     }
 
     let revealer = Revealer::new();
@@ -624,14 +641,11 @@ fn build_group_row(
     // --- Mark-group-read button handler (no navigation) ---
     {
         let conn = conn.clone();
-        let list_box = list_box.clone();
-        let row_weak = row.downgrade();
         let channel_id = newest.channel_id.clone();
+        let do_reload = do_reload.clone();
         mark_btn.connect_clicked(move |_| {
             let _ = db::mark_channel_read(&*conn, &channel_id);
-            if let Some(row) = row_weak.upgrade() {
-                list_box.remove(&row);
-            }
+            do_reload();
         });
     }
 
@@ -639,17 +653,14 @@ fn build_group_row(
     {
         let nav_tx = nav_tx.clone();
         let conn = conn.clone();
-        let list_box = list_box.clone();
-        let row_weak = row.downgrade();
         let channel_id = newest.channel_id.clone();
         let guild_id = newest.guild_id.clone();
+        let do_reload = do_reload.clone();
         let gesture = GestureClick::new();
         gesture.connect_released(move |_, _, _, _| {
             let _ = nav_tx.send((guild_id.clone(), channel_id.clone()));
             let _ = db::mark_channel_read(&*conn, &channel_id);
-            if let Some(row) = row_weak.upgrade() {
-                list_box.remove(&row);
-            }
+            do_reload();
         });
         header_hbox.add_controller(gesture);
     }
@@ -665,6 +676,7 @@ fn build_row(
     nav_tx: &mpsc::Sender<(Option<String>, String)>,
     fetch_sem: &FetchSem,
     icon_cache: &IconCache,
+    post_change: Option<Rc<dyn Fn()>>,
 ) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("notification-row");
@@ -783,23 +795,28 @@ fn build_row(
         let row_weak = row.downgrade();
         let pinned_state = pinned_state.clone();
         let read_state = read_state.clone();
+        let post_change = post_change.clone();
         pin_btn.connect_clicked(move |btn| {
             let new_pinned = !pinned_state.get();
             pinned_state.set(new_pinned);
             let _ = db::set_pinned(&*conn, n_id, new_pinned);
 
-            btn.set_label(if new_pinned { "📍" } else { "📌" });
-            btn.set_tooltip_text(Some(if new_pinned { "Unpin" } else { "Pin" }));
-            if new_pinned {
-                btn.add_css_class("active-pin");
-                if let Some(row) = row_weak.upgrade() { row.add_css_class("pinned-row"); }
+            if let Some(f) = &post_change {
+                f();
             } else {
-                btn.remove_css_class("active-pin");
-                if let Some(row) = row_weak.upgrade() {
-                    row.remove_css_class("pinned-row");
-                    // Unpinned + already read → remove from default view
-                    if !show_all.get() && read_state.get() {
-                        list_box.remove(&row);
+                btn.set_label(if new_pinned { "📍" } else { "📌" });
+                btn.set_tooltip_text(Some(if new_pinned { "Unpin" } else { "Pin" }));
+                if new_pinned {
+                    btn.add_css_class("active-pin");
+                    if let Some(row) = row_weak.upgrade() { row.add_css_class("pinned-row"); }
+                } else {
+                    btn.remove_css_class("active-pin");
+                    if let Some(row) = row_weak.upgrade() {
+                        row.remove_css_class("pinned-row");
+                        // Unpinned + already read → remove from default view
+                        if !show_all.get() && read_state.get() {
+                            list_box.remove(&row);
+                        }
                     }
                 }
             }
@@ -814,23 +831,28 @@ fn build_row(
         let row_weak = row.downgrade();
         let read_state = read_state.clone();
         let pinned_state = pinned_state.clone();
+        let post_change = post_change.clone();
         read_btn.connect_clicked(move |btn| {
             let new_read = !read_state.get();
             read_state.set(new_read);
             let _ = db::set_read(&*conn, n_id, new_read);
 
-            btn.set_label(if new_read { "↩" } else { "✓" });
-            btn.set_tooltip_text(Some(if new_read { "Mark unread" } else { "Mark read" }));
+            if let Some(f) = &post_change {
+                f();
+            } else {
+                btn.set_label(if new_read { "↩" } else { "✓" });
+                btn.set_tooltip_text(Some(if new_read { "Mark unread" } else { "Mark read" }));
 
-            if let Some(row) = row_weak.upgrade() {
-                if new_read {
-                    row.remove_css_class("unread");
-                    // Default mode: remove row unless pinned
-                    if !show_all.get() && !pinned_state.get() {
-                        list_box.remove(&row);
+                if let Some(row) = row_weak.upgrade() {
+                    if new_read {
+                        row.remove_css_class("unread");
+                        // Default mode: remove row unless pinned
+                        if !show_all.get() && !pinned_state.get() {
+                            list_box.remove(&row);
+                        }
+                    } else {
+                        row.add_css_class("unread");
                     }
-                } else {
-                    row.add_css_class("unread");
                 }
             }
         });
@@ -843,6 +865,7 @@ fn build_row(
         let show_all = show_all.clone();
         let row_weak = row.downgrade();
         let read_state = read_state.clone();
+        let post_change = post_change.clone();
         let gesture = GestureClick::new();
         gesture.connect_released(move |_, _, _, _| {
             let _ = nav_tx.send((n_guild_id.clone(), n_channel_id.clone()));
@@ -850,10 +873,14 @@ fn build_row(
             if !read_state.get() {
                 read_state.set(true);
                 let _ = db::set_read(&*conn, n_id, true);
-                if let Some(row) = row_weak.upgrade() {
-                    row.remove_css_class("unread");
-                    if !show_all.get() {
-                        list_box.remove(&row);
+                if let Some(f) = &post_change {
+                    f();
+                } else {
+                    if let Some(row) = row_weak.upgrade() {
+                        row.remove_css_class("unread");
+                        if !show_all.get() {
+                            list_box.remove(&row);
+                        }
                     }
                 }
             }
