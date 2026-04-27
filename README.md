@@ -14,11 +14,18 @@ Connects to the running Discord client via IPC, authenticates, and subscribes to
 database, including the `guild_id` resolved via a follow-up `GET_CHANNEL` RPC call
 (needed for Discord deep links).
 
-If the connection to Discord drops (e.g. Discord is restarted), the daemon
-reconnects automatically with exponential backoff (5s → 10s → 30s → 60s).
+If Discord is not running when the daemon starts, it waits and retries every 5
+seconds until it can connect. If the connection drops while running (e.g. Discord
+is restarted), the daemon reconnects automatically on the same 5-second poll.
+
+A system notification (`notify-send`) is shown on first connect, on disconnection,
+and on reconnect.
+
+Only one daemon instance may run at a time; a second invocation will exit
+immediately with an error.
 
 Notifications older than 24 hours (excluding pinned) are deleted on startup and
-once every 24 hours while the daemon is running.
+once every 4 hours while the daemon is running.
 
 ```
 discord-notification-center
@@ -39,18 +46,30 @@ discord-notification-center toggle
 
 - Only notifications from the last 24 hours are shown (pinned notifications are
   always visible regardless of age)
-- Notifications are listed newest-first; new arrivals appear at the top in real
-  time while the panel is open (polled every second from the database)
+- Notifications are listed newest-first; new arrivals appear while the panel is
+  open (polled every second from the database)
 - Sender avatars are loaded asynchronously from Discord's CDN
-- Each notification has two action buttons:
+- Multiple unread messages from the same channel or DM are **grouped** into a
+  single summary row; hovering expands the group to show individual messages
+- Each notification (and each row inside an expanded group) has two action buttons:
   - **📌 / 📍** — pin or unpin (pinned notifications stay visible until explicitly unpinned)
   - **✓ / ↩** — mark as read / mark as unread
-- Clicking a notification navigates directly to that message in the Discord client
-  and marks it as read
+- Clicking a notification (or a group header) navigates directly to that channel
+  in the Discord client and marks it as read
+- **✓** on a group header marks all messages in that channel as read
 - **✓ all** button in the header marks every notification as read
-- **All** toggle in the header switches between unread-only (default) and full
-  history; in full-history mode the read button acts as a toggle
+- **All** toggle (or **Ctrl+F**) switches to full-history mode and focuses the
+  filter field; switching back clears the filter
+- **Filter field** (All mode only) — type to instantly filter notifications by
+  channel name, body text, sender, or message content; the **✕** button clears it
 - **Esc** closes the panel
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+F` | Switch to All mode and focus the filter field |
+| `Esc` | Close the panel |
 
 ## Configuration
 

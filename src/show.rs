@@ -21,9 +21,10 @@ use std::time::Duration;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, EventControllerKey,
-    EventControllerMotion, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation,
-    PolicyType, Revealer, RevealerTransitionType, ScrolledWindow, SelectionMode, ToggleButton,
+    Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry,
+    EventControllerKey, EventControllerMotion, GestureClick, Image, Label, ListBox, ListBoxRow,
+    Orientation, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow, SelectionMode,
+    ToggleButton,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
@@ -241,6 +242,37 @@ row.notification-group.pinned-row {
     background-color: @base;
 }
 
+/* Filter bar (All mode) */
+.filter-bar {
+    background-color: @surface;
+    border-bottom: 1px solid @highlight_med;
+    padding: 6px 10px;
+}
+
+entry.filter-entry {
+    background-color: @overlay;
+    color: @rp_text;
+    border: 1px solid @highlight_med;
+    border-radius: 6px;
+    padding: 2px 6px;
+    font-size: 9pt;
+    min-height: 0;
+}
+
+entry.filter-entry:focus {
+    border-color: @iris;
+}
+
+.filter-clear-btn {
+    color: @muted;
+    padding: 2px 6px;
+}
+
+.filter-clear-btn:hover {
+    color: @love;
+    background-color: transparent;
+}
+
 #notification-list,
 #notification-list > row,
 scrolledwindow,
@@ -328,21 +360,6 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
     window.set_keyboard_mode(KeyboardMode::OnDemand);
     window.set_default_size(400, -1);
 
-    // Esc closes the panel
-    let key_ctrl = EventControllerKey::new();
-    let win_weak = window.downgrade();
-    key_ctrl.connect_key_pressed(move |_, key, _, _| {
-        if key == gtk4::gdk::Key::Escape {
-            if let Some(w) = win_weak.upgrade() {
-                w.close();
-            }
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    window.add_controller(key_ctrl);
-
     // Header bar (plain Box to avoid window-decoration chrome)
     let header = GtkBox::new(Orientation::Horizontal, 8);
     header.add_css_class("notification-header");
@@ -371,8 +388,26 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
     scrolled.set_vexpand(true);
     scrolled.set_child(Some(&list_box));
 
+    // Filter bar — only visible in All mode
+    let filter_bar = GtkBox::new(Orientation::Horizontal, 6);
+    filter_bar.add_css_class("filter-bar");
+    filter_bar.set_visible(false);
+
+    let filter_entry = Entry::new();
+    filter_entry.set_placeholder_text(Some("Filter notifications…"));
+    filter_entry.set_hexpand(true);
+    filter_entry.add_css_class("filter-entry");
+    filter_bar.append(&filter_entry);
+
+    let filter_clear_btn = Button::with_label("✕");
+    filter_clear_btn.add_css_class("filter-clear-btn");
+    filter_clear_btn.set_visible(false);
+    filter_clear_btn.set_tooltip_text(Some("Clear filter"));
+    filter_bar.append(&filter_clear_btn);
+
     let content = GtkBox::new(Orientation::Vertical, 0);
     content.append(&header);
+    content.append(&filter_bar);
     content.append(&scrolled);
 
     // Revealer provides the slide-in-from-right animation
@@ -387,10 +422,11 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
     // Shared state
     let show_all = Rc::new(Cell::new(false));
     let last_id = Rc::new(Cell::new(0i64));
+    let filter_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
 
-    load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
+    load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache, &filter_text);
 
-    // Show-all toggle: clear list and reload
+    // Show-all toggle: show/hide filter bar, clear filter when leaving All mode
     {
         let conn = conn.clone();
         let list_box = list_box.clone();
@@ -399,12 +435,24 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
         let nav_tx = nav_tx.clone();
         let fetch_sem = fetch_sem.clone();
         let icon_cache = icon_cache.clone();
+        let filter_text = filter_text.clone();
+        let filter_bar = filter_bar.clone();
+        let filter_entry = filter_entry.clone();
         show_all_btn.connect_toggled(move |btn| {
-            show_all.set(btn.is_active());
+            let active = btn.is_active();
+            show_all.set(active);
+            filter_bar.set_visible(active);
+            if active {
+                filter_entry.grab_focus();
+            } else {
+                // Clearing the entry triggers connect_changed which updates filter_text.
+                // Since show_all is now false, connect_changed returns early without reload.
+                filter_entry.set_text("");
+            }
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
-            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
+            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache, &filter_text);
         });
     }
 
@@ -417,12 +465,46 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
         let nav_tx = nav_tx.clone();
         let fetch_sem = fetch_sem.clone();
         let icon_cache = icon_cache.clone();
+        let filter_text = filter_text.clone();
         mark_all_btn.connect_clicked(move |_| {
             let _ = db::mark_all_read(&*conn);
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
-            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
+            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache, &filter_text);
+        });
+    }
+
+    // Filter entry: update filter state and reload (only when in All mode)
+    {
+        let conn = conn.clone();
+        let list_box = list_box.clone();
+        let show_all = show_all.clone();
+        let last_id = last_id.clone();
+        let nav_tx = nav_tx.clone();
+        let fetch_sem = fetch_sem.clone();
+        let icon_cache = icon_cache.clone();
+        let filter_text = filter_text.clone();
+        let filter_clear_btn = filter_clear_btn.clone();
+        filter_entry.connect_changed(move |e| {
+            let text = e.text().to_string().to_lowercase();
+            filter_clear_btn.set_visible(!text.is_empty());
+            *filter_text.borrow_mut() = text;
+            if !show_all.get() {
+                return;
+            }
+            while let Some(child) = list_box.first_child() {
+                list_box.remove(&child);
+            }
+            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache, &filter_text);
+        });
+    }
+
+    // Clear filter button
+    {
+        let filter_entry = filter_entry.clone();
+        filter_clear_btn.connect_clicked(move |_| {
+            filter_entry.set_text("");
         });
     }
 
@@ -435,6 +517,7 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
         let nav_tx = nav_tx.clone();
         let fetch_sem = fetch_sem.clone();
         let icon_cache = icon_cache.clone();
+        let filter_text = filter_text.clone();
         glib::timeout_add_local(Duration::from_secs(1), move || {
             if show_all.get() {
                 return glib::ControlFlow::Continue;
@@ -444,11 +527,38 @@ fn build_ui(app: &Application, conn: Rc<rusqlite::Connection>, nav_tx: mpsc::Sen
                     while let Some(child) = list_box.first_child() {
                         list_box.remove(&child);
                     }
-                    load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
+                    load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache, &filter_text);
                 }
             }
             glib::ControlFlow::Continue
         });
+    }
+
+    // Keyboard shortcuts: Escape closes, Ctrl+F jumps to filter
+    {
+        let key_ctrl = EventControllerKey::new();
+        let win_weak = window.downgrade();
+        let show_all_btn = show_all_btn.clone();
+        let filter_entry = filter_entry.clone();
+        let show_all = show_all.clone();
+        key_ctrl.connect_key_pressed(move |_, key, _, state| {
+            match key {
+                gtk4::gdk::Key::Escape => {
+                    if let Some(w) = win_weak.upgrade() { w.close(); }
+                    glib::Propagation::Stop
+                }
+                gtk4::gdk::Key::f if state.contains(gtk4::gdk::ModifierType::CONTROL_MASK) => {
+                    if !show_all.get() {
+                        show_all_btn.set_active(true); // triggers connect_toggled → grab_focus
+                    } else {
+                        filter_entry.grab_focus();
+                    }
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        window.add_controller(key_ctrl);
     }
 
     window.present();
@@ -468,10 +578,15 @@ fn load_notifications(
     nav_tx: &mpsc::Sender<(Option<String>, String)>,
     fetch_sem: &FetchSem,
     icon_cache: &IconCache,
+    filter_text: &Rc<RefCell<String>>,
 ) {
-    let notifications = db::fetch_display(&**conn, show_all.get()).unwrap_or_default();
+    let mut notifications = db::fetch_display(&**conn, show_all.get()).unwrap_or_default();
     if let Some(max) = notifications.iter().map(|n| n.id).max() {
         last_id.set(max);
+    }
+    let filter = filter_text.borrow().clone();
+    if !filter.is_empty() {
+        notifications.retain(|n| matches_filter(n, &filter));
     }
     if show_all.get() {
         for n in &notifications {
@@ -482,11 +597,18 @@ fn load_notifications(
             let widget = if group.len() == 1 {
                 build_row(&group[0], conn, list_box, show_all, nav_tx, fetch_sem, icon_cache, None)
             } else {
-                build_group_row(group, conn, list_box, show_all, last_id, nav_tx, fetch_sem, icon_cache)
+                build_group_row(group, conn, list_box, show_all, last_id, nav_tx, fetch_sem, icon_cache, filter_text)
             };
             list_box.append(&widget);
         }
     }
+}
+
+fn matches_filter(n: &Notification, query: &str) -> bool {
+    n.title.to_lowercase().contains(query)
+        || n.body.to_lowercase().contains(query)
+        || n.author_username.to_lowercase().contains(query)
+        || n.message_content.as_deref().unwrap_or("").to_lowercase().contains(query)
 }
 
 fn build_group_row(
@@ -498,6 +620,7 @@ fn build_group_row(
     nav_tx: &mpsc::Sender<(Option<String>, String)>,
     fetch_sem: &FetchSem,
     icon_cache: &IconCache,
+    filter_text: &Rc<RefCell<String>>,
 ) -> ListBoxRow {
     let newest = &group[0];
     let unread_count = group.iter().filter(|n| !n.read).count();
@@ -510,11 +633,12 @@ fn build_group_row(
         let nav_tx = nav_tx.clone();
         let fetch_sem = fetch_sem.clone();
         let icon_cache = icon_cache.clone();
+        let filter_text = filter_text.clone();
         Rc::new(move || {
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
-            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache);
+            load_notifications(&conn, &list_box, &show_all, &last_id, &nav_tx, &fetch_sem, &icon_cache, &filter_text);
         })
     };
 

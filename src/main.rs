@@ -77,10 +77,10 @@ fn run_daemon(cfg: config::Config) -> Result<()> {
 
     let db = db::open_db()?;
 
-    // GC on startup, then once every 24 hours on a separate connection.
+    // GC on startup, then once every 4 hours on a separate connection.
     run_gc(&db);
     thread::spawn(|| loop {
-        thread::sleep(Duration::from_secs(24 * 3600));
+        thread::sleep(Duration::from_secs(4 * 3600));
         match db::open_db() {
             Ok(conn) => run_gc(&conn),
             Err(e)   => eprintln!("[gc] could not open db: {e}"),
