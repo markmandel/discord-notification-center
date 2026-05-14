@@ -989,6 +989,7 @@ fn build_row(
         let show_all = show_all.clone();
         let row_weak = row.downgrade();
         let read_state = read_state.clone();
+        let pinned_state = pinned_state.clone();
         let post_change = post_change.clone();
         let gesture = GestureClick::new();
         gesture.connect_released(move |_, _, _, _| {
@@ -1002,7 +1003,8 @@ fn build_row(
                 } else {
                     if let Some(row) = row_weak.upgrade() {
                         row.remove_css_class("unread");
-                        if !show_all.get() {
+                        // Default mode: remove row unless pinned
+                        if !show_all.get() && !pinned_state.get() {
                             list_box.remove(&row);
                         }
                     }
