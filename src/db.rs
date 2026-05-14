@@ -50,6 +50,7 @@ pub fn open_db() -> Result<Connection> {
         .map_err(|e| format!("cannot open database {}: {e}", db_path.display()))?;
 
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
 
     conn.execute_batch("
         CREATE TABLE IF NOT EXISTS notifications (
